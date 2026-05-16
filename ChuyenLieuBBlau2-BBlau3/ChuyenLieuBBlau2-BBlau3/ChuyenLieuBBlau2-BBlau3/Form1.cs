@@ -94,20 +94,7 @@ namespace ChuyenLieuBBlau2_BBlau3
             if (!lau2ToEquip.TryGetValue(lau2Ip, out string equipCode))
                 return;
 
-            // Lấy Plan_Id đã tồn tại (từ hôm qua)
-            string getExistingPlans = $@"
-                SELECT Plan_Id FROM [mfns].[dbo].[AutoSmall_ScanCode]
-                WHERE Equip_Code = '{equipCode}' AND Prd_Date >= '{DateTime.Now.AddDays(-1):yyyyMMdd}'
-                UNION
-                SELECT Plan_Id FROM [mfns].[dbo].[AutoSmall_ScanCode_new]
-                WHERE Equip_Code = '{equipCode}' AND Prd_Date >= '{DateTime.Now.AddDays(-1):yyyyMMdd}'";
-
-            var existing = SQlcnn.ExecuteQueryWithIP(serverIp, getExistingPlans);
-            string excludedPlans = existing.Rows.Count > 0
-                ? "'" + string.Join("','", existing.Rows.Cast<DataRow>().Select(r => r["Plan_Id"].ToString().Trim())) + "'"
-                : "";
-
-            // Query lấy dữ liệu cân mới
+            // Lấy TẤT CẢ dữ liệu cân từ lầu 2 (không loại trừ)
             string baseQuery = $@"
                 SELECT 
                     a.[Plan_id] + RIGHT('000' + CAST([Serial_Num] AS VARCHAR(5)), 3) AS Plan_ID,
@@ -120,41 +107,55 @@ namespace ChuyenLieuBBlau2_BBlau3
                 INNER JOIN [dbo].[LR_plan] b ON a.Plan_id = b.Plan_Id
                 WHERE Weight_Time >= '{DateTime.Now.AddDays(-3):yyyy-MM-dd}'
                   AND a.Plan_id LIKE 'V%'
-                  {(string.IsNullOrEmpty(excludedPlans) ? "" : $"AND a.[Plan_id] + RIGHT('000' + CAST([Serial_Num] AS VARCHAR(5)), 3) NOT IN ({excludedPlans})")}
                 GROUP BY a.Plan_id, Serial_Num, b.Recipe_Name, b.Plan_Date, a.Equip_code";
 
             DataTable dataFromLau2 = GetDataFromLau2(lau2Ip, baseQuery);
 
             if (dataFromLau2?.Rows.Count > 0)
             {
-                string insertSql = "";
                 foreach (DataRow row in dataFromLau2.Rows)
                 {
                     string barcode = row["Plan_ID"].ToString().Trim();
 
-                    // Kiểm tra đã có barcode chưa
-                    string checkSql = $"SELECT Mater_Barcode FROM [mfns].[dbo].[Ppt_BarCodeRep] WHERE Mater_Barcode = '{barcode}'";
-                    var checkDt = SQlcnn.ExecuteQueryWithIP(serverIp, checkSql);
-
-                    if (checkDt.Rows.Count == 0)
+                    try
                     {
+                        // Kiểm tra dữ liệu đã có trên máy BB này chưa
+                        string checkExistSql = $@"
+                            SELECT Plan_Id FROM [mfns].[dbo].[AutoSmall_ScanCode]
+                            WHERE Plan_Id = '{barcode}'
+                            UNION
+                            SELECT Plan_Id FROM [mfns].[dbo].[AutoSmall_ScanCode_new]
+                            WHERE Plan_Id = '{barcode}'";
+                        var existDt = SQlcnn.ExecuteQueryWithIP(serverIp, checkExistSql);
+
+                        if (existDt.Rows.Count > 0)
+                            continue; // Đã có trên máy này → bỏ qua
+
+                        // Kiểm tra barcode trong Ppt_BarCodeRep
+                        string checkBarcodeSql = $"SELECT Mater_Barcode FROM [mfns].[dbo].[Ppt_BarCodeRep] WHERE Mater_Barcode = '{barcode}'";
+                        var checkBarcodeDt = SQlcnn.ExecuteQueryWithIP(serverIp, checkBarcodeSql);
+
+                        if (checkBarcodeDt.Rows.Count > 0)
+                            continue; // Đã có barcode → bỏ qua
+
                         string may = row["Equip_code"].ToString().Trim();
                         string pday = row["pday"].ToString().Trim();
                         string recipe = row["Recipe_Name"].ToString().Trim();
-                        string planDate = row["time"].ToString().Trim(); // cột time thực ra là max Weight_Time
+                        string planDate = row["time"].ToString().Trim();
                         string weight = row["realwgt"].ToString().Trim();
 
                         DateTime prodDate = DateTime.ParseExact(pday, "yyyyMMdd", CultureInfo.InvariantCulture);
                         string effDate = prodDate.AddDays(7).ToString("yyyyMMdd");
 
-                        insertSql += $"INSERT INTO [mfns].[dbo].[AutoSmall_ScanCode] " +
-                                     $"VALUES ('{barcode}', '{pday}', '{effDate}', '{recipe}', '{may}', '{planDate}', '{weight}', '0'); ";
-                    }
-                }
+                        string insertSql = $"INSERT INTO [mfns].[dbo].[AutoSmall_ScanCode] " +
+                                           $"VALUES ('{barcode}', '{pday}', '{effDate}', '{recipe}', '{may}', '{planDate}', '{weight}', '0')";
 
-                if (!string.IsNullOrEmpty(insertSql))
-                {
-                    SQlcnn.ExecuteNonQueryWithIP(serverIp, insertSql);
+                        SQlcnn.ExecuteNonQueryWithIP(serverIp, insertSql);
+                    }
+                    catch
+                    {
+                        // Lỗi → bỏ qua dòng này, đợi lần sau thử lại
+                    }
                 }
             }
         }
