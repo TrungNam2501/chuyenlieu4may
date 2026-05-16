@@ -93,6 +93,43 @@ namespace ChuyenLieuBBlau2_BBlau3.ConnSQL
 
         }
 
+        public static bool ExecuteNonQueryWithIP_ERP(string ip, string query, object[] parameter = null)
+        {
+            string ConnectionString = "Data Source=" + ip + ";Failover Partner=198.1.10.31;Initial Catalog=erp;User ID=kendakv2;Password=kenda123";
+            using (var conn = new SqlConnection(ConnectionString))
+            {
+                try
+                {
+                    conn.Open();
+                    SqlCommand cmd = new SqlCommand(query, conn);
+                    if (parameter != null)
+                    {
+                        string[] listPara = query.Split(' ');
+                        int i = 0;
+                        foreach (string item in listPara)
+                        {
+                            if (item.Contains('?'))
+                            {
+                                cmd.Parameters.AddWithValue(item, parameter[i]);
+                                i++;
+                            }
+                        }
+                    }
+                    int effectedRow = cmd.ExecuteNonQuery();
+                    return effectedRow > 0;
+                }
+                catch (Exception ex)
+                {
+                    return false;
+                }
+                finally
+                {
+                    if (conn.State != ConnectionState.Closed)
+                        conn.Close();
+                }
+            }
+        }
+
         public static bool ExecuteNonQueryWithIP(string ip,string query, object[] parameter = null)
         {
             string ConnectionString = "Data Source=" + ip + ";Failover Partner=198.1.10.31;Initial Catalog=mfnsShareDB;User ID=kendakv2;Password=kenda123";
