@@ -12,16 +12,19 @@ namespace ChuyenLieuBBlau2_BBlau3
 {
     public partial class Form1 : Form
     {
-        private readonly Dictionary<string, string> lau2ToEquip = new Dictionary<string, string>
-        {
-            { "198.1.8.15", "03" },
-            { "198.1.8.16", "01" },
-            { "198.1.8.17", "02" },
-            { "198.1.8.18", "04" }
-        };
-
         private readonly string[] lau2Ips = { "198.1.8.15", "198.1.8.16", "198.1.8.17", "198.1.8.18" };
-        private readonly Dictionary<string, Label> statusLabels; // sẽ gán ở Load
+        private readonly Dictionary<string, Label> statusLabels;
+
+        private const string TrackerServer = "198.1.10.33";
+        private const string ERP_SERVER = "198.1.10.33";
+        private const string GET_IP_QUERY = "SELECT [ip] FROM [erp].[dbo].[P8500_IP] WHERE machno LIKE 'V-BB%'";
+        private const string DEL_DUP_QUERY = @"
+            DELETE aliasName FROM (
+                SELECT [Plan_Id], ROW_NUMBER() OVER (PARTITION BY [Plan_Id] ORDER BY [Plan_Id]) AS rowNumber
+                FROM [mfns].[dbo].[AutoSmall_ScanCode]
+            ) aliasName WHERE rowNumber > 1";
+
+        private bool _trackerTableCreated = false;
 
         public Form1()
         {
@@ -49,49 +52,142 @@ namespace ChuyenLieuBBlau2_BBlau3
         {
             while (true)
             {
-                var ping = new Ping();
-                const string getIpQuery = "SELECT [ip] FROM [erp].[dbo].[P8500_IP] WHERE machno LIKE 'V-BB%'";
-                const string delDupQuery = @"
-                    DELETE aliasName FROM (
-                        SELECT [Plan_Id], ROW_NUMBER() OVER (PARTITION BY [Plan_Id] ORDER BY [Plan_Id]) AS rowNumber
-                        FROM [mfns].[dbo].[AutoSmall_ScanCode]
-                    ) aliasName WHERE rowNumber > 1";
-
                 try
                 {
-                    var dtIP = SQlcnn.ExecuteQueryWithIP_ERP("198.1.10.33", getIpQuery);
+                    EnsureSyncTrackerTable();
 
-                    foreach (DataRow row in dtIP.Rows)
+                    // Bước 1: Query dữ liệu lầu 2 CHỈ 1 LẦN (trước đây query lại 8 lần cho mỗi máy BB)
+                    string baseQuery = $@"
+                        SELECT 
+                            a.[Plan_id] + RIGHT('000' + CAST([Serial_Num] AS VARCHAR(5)), 3) AS Plan_ID,
+                            b.Recipe_Name, 
+                            REPLACE(b.Plan_Date, '-', '') AS pday,
+                            SUM(a.Real_Weight) AS realwgt, 
+                            a.Equip_code,
+                            (SELECT MAX(Weight_Time) FROM [CWSS_S7].[dbo].[LR_weigh] WHERE Plan_id = a.Plan_Id) AS time
+                        FROM [CWSS_S7].[dbo].[LR_weigh] a
+                        INNER JOIN [dbo].[LR_plan] b ON a.Plan_id = b.Plan_Id
+                        WHERE Weight_Time >= '{DateTime.Now.AddDays(-3):yyyy-MM-dd}'
+                          AND a.Plan_id LIKE 'V%'
+                        GROUP BY a.Plan_id, Serial_Num, b.Recipe_Name, b.Plan_Date, a.Equip_code";
+
+                    using (DataTable dataFromLau2 = GetDataFromLau2(targetLau2Ip, baseQuery))
                     {
-                        string machineIp = row["ip"].ToString().Trim();
-                        var reply = ping.Send(machineIp, 500); // tăng timeout lên 500ms cho an toàn
+                        if (dataFromLau2 == null || dataFromLau2.Rows.Count == 0)
+                            goto updateLabel;
 
-                        if (reply?.Status == IPStatus.Success)
+                        // Bước 2: Lấy danh sách BB IPs
+                        using (var dtIP = SQlcnn.ExecuteQueryWithIP_ERP(ERP_SERVER, GET_IP_QUERY))
                         {
-                            ChuyenLieu_HC(machineIp, targetLau2Ip);
-                            SQlcnn.ExecuteNonQueryWithIP(machineIp, delDupQuery);
+                            if (dtIP.Rows.Count == 0)
+                                goto updateLabel;
+
+                            // Bước 3: Load tracker 1 LẦN cho TẤT CẢ BB machines
+                            // (trước đây load 8 lần riêng lẻ, mỗi lần 1 serverIp)
+                            var trackerByServer = LoadAllTracker();
+
+                            // Bước 4: Lặp qua từng máy BB
+                            foreach (DataRow ipRow in dtIP.Rows)
+                            {
+                                string bbIp = ipRow["ip"].ToString().Trim();
+
+                                // Ping với using để dispose đúng (sửa memory leak)
+                                using (var ping = new Ping())
+                                {
+                                    var reply = ping.Send(bbIp, 500);
+                                    if (reply?.Status != IPStatus.Success)
+                                        continue;
+                                }
+
+                                // Lấy tracker cho máy BB này
+                                HashSet<string> syncedPlanIds;
+                                if (!trackerByServer.TryGetValue(bbIp, out syncedPlanIds))
+                                    syncedPlanIds = new HashSet<string>();
+
+                                // Lọc barcodes chưa sync (kiểm tra nhanh O(1) từ HashSet)
+                                var toProcess = new List<DataRow>();
+                                foreach (DataRow row in dataFromLau2.Rows)
+                                {
+                                    string barcode = row["Plan_ID"].ToString().Trim();
+                                    if (!syncedPlanIds.Contains(barcode))
+                                        toProcess.Add(row);
+                                }
+
+                                if (toProcess.Count == 0)
+                                {
+                                    SQlcnn.ExecuteNonQueryWithIP(bbIp, DEL_DUP_QUERY);
+                                    continue;
+                                }
+
+                                // Bước 5: Batch kiểm tra barcodes đã tồn tại trong Ppt_BarCodeRep
+                                // 1 query IN(...) thay vì N query riêng lẻ (sửa memory leak DataTable)
+                                var barcodeList = toProcess.Select(r => r["Plan_ID"].ToString().Trim()).ToList();
+                                var existingBarcodes = BatchCheckExistingBarcodes(bbIp, barcodeList);
+
+                                // Bước 6: INSERT từng barcode chưa có
+                                foreach (DataRow row in toProcess)
+                                {
+                                    string barcode = row["Plan_ID"].ToString().Trim();
+
+                                    try
+                                    {
+                                        if (existingBarcodes.Contains(barcode))
+                                        {
+                                            // Đã có barcode → ghi tracker để lần sau bỏ qua
+                                            SQlcnn.ExecuteNonQueryWithIP_BB(TrackerServer,
+                                                $"INSERT INTO AutoSmall_SyncTracker (Plan_Id, ServerIp) VALUES ('{barcode}', '{bbIp}')");
+                                            continue;
+                                        }
+
+                                        string may = row["Equip_code"].ToString().Trim();
+                                        string pday = row["pday"].ToString().Trim();
+                                        string recipe = row["Recipe_Name"].ToString().Trim();
+                                        string planDate = row["time"].ToString().Trim();
+                                        string weight = row["realwgt"].ToString().Trim();
+
+                                        DateTime prodDate = DateTime.ParseExact(pday, "yyyyMMdd", CultureInfo.InvariantCulture);
+                                        string effDate = prodDate.AddDays(7).ToString("yyyyMMdd");
+
+                                        string insertSql = $"INSERT INTO [mfns].[dbo].[AutoSmall_ScanCode] " +
+                                                           $"VALUES ('{barcode}', '{pday}', '{effDate}', '{recipe}', '{may}', '{planDate}', '{weight}', '0')";
+
+                                        bool success = SQlcnn.ExecuteNonQueryWithIP(bbIp, insertSql);
+
+                                        if (success)
+                                        {
+                                            SQlcnn.ExecuteNonQueryWithIP_BB(TrackerServer,
+                                                $"INSERT INTO AutoSmall_SyncTracker (Plan_Id, ServerIp) VALUES ('{barcode}', '{bbIp}')");
+                                        }
+                                    }
+                                    catch
+                                    {
+                                        // Lỗi → bỏ qua dòng này, đợi lần sau thử lại
+                                    }
+                                }
+
+                                SQlcnn.ExecuteNonQueryWithIP(bbIp, DEL_DUP_QUERY);
+                            }
                         }
                     }
 
-                    // Update label trên UI thread
+                    updateLabel:
                     if (statusLabels.TryGetValue(targetLau2Ip, out var label))
                     {
                         label.Invoke((MethodInvoker)(() => label.Text = $"{targetLau2Ip.Split('.')[3]} ok"));
                     }
                 }
-                catch (Exception ex)
+                catch
                 {
-                    // Có thể log lỗi ở đây sau này
-                    // Console.WriteLine($"Lỗi sync {targetLau2Ip}: {ex.Message}");
+                    // Lỗi → bỏ qua chu kỳ này
                 }
 
                 Thread.Sleep(200000); // 200 giây
             }
         }
 
-        private const string TrackerServer = "198.1.10.33";
-        private bool _trackerTableCreated = false;
-
+        /// <summary>
+        /// Tạo bảng tracker trên server 10.33 (database BB) nếu chưa có.
+        /// </summary>
         private void EnsureSyncTrackerTable()
         {
             if (_trackerTableCreated) return;
@@ -108,95 +204,60 @@ namespace ChuyenLieuBBlau2_BBlau3
             _trackerTableCreated = true;
         }
 
-        private void ChuyenLieu_HC(string serverIp, string lau2Ip)
+        /// <summary>
+        /// Load toàn bộ tracker 1 lần cho tất cả BB machines (3 ngày gần nhất).
+        /// Trả về Dictionary: serverIp → HashSet of Plan_Id đã sync.
+        /// </summary>
+        private Dictionary<string, HashSet<string>> LoadAllTracker()
         {
-            if (!lau2ToEquip.TryGetValue(lau2Ip, out string equipCode))
-                return;
+            var result = new Dictionary<string, HashSet<string>>();
 
-            // Đảm bảo bảng tracker tồn tại trên server 10.33
-            EnsureSyncTrackerTable();
+            string sql = $@"
+                SELECT Plan_Id, ServerIp FROM AutoSmall_SyncTracker
+                WHERE SyncTime >= '{DateTime.Now.AddDays(-3):yyyy-MM-dd}'";
 
-            // Load 1 lần toàn bộ Plan_Id đã sync thành công trên máy này (3 ngày gần nhất)
-            string loadTrackerSql = $@"
-                SELECT Plan_Id FROM AutoSmall_SyncTracker
-                WHERE ServerIp = '{serverIp}'
-                  AND SyncTime >= '{DateTime.Now.AddDays(-3):yyyy-MM-dd}'";
-            var trackerDt = SQlcnn.ExecuteQueryWithIP_BB(TrackerServer, loadTrackerSql);
-            var syncedPlanIds = new HashSet<string>();
-            foreach (DataRow r in trackerDt.Rows)
+            using (var dt = SQlcnn.ExecuteQueryWithIP_BB(TrackerServer, sql))
             {
-                syncedPlanIds.Add(r["Plan_Id"].ToString().Trim());
+                foreach (DataRow r in dt.Rows)
+                {
+                    string serverIp = r["ServerIp"].ToString().Trim();
+                    string planId = r["Plan_Id"].ToString().Trim();
+
+                    if (!result.ContainsKey(serverIp))
+                        result[serverIp] = new HashSet<string>();
+                    result[serverIp].Add(planId);
+                }
             }
 
-            // Lấy TẤT CẢ dữ liệu cân từ lầu 2
-            string baseQuery = $@"
-                SELECT 
-                    a.[Plan_id] + RIGHT('000' + CAST([Serial_Num] AS VARCHAR(5)), 3) AS Plan_ID,
-                    b.Recipe_Name, 
-                    REPLACE(b.Plan_Date, '-', '') AS pday,
-                    SUM(a.Real_Weight) AS realwgt, 
-                    a.Equip_code,
-                    (SELECT MAX(Weight_Time) FROM [CWSS_S7].[dbo].[LR_weigh] WHERE Plan_id = a.Plan_Id) AS time
-                FROM [CWSS_S7].[dbo].[LR_weigh] a
-                INNER JOIN [dbo].[LR_plan] b ON a.Plan_id = b.Plan_Id
-                WHERE Weight_Time >= '{DateTime.Now.AddDays(-3):yyyy-MM-dd}'
-                  AND a.Plan_id LIKE 'V%'
-                GROUP BY a.Plan_id, Serial_Num, b.Recipe_Name, b.Plan_Date, a.Equip_code";
+            return result;
+        }
 
-            DataTable dataFromLau2 = GetDataFromLau2(lau2Ip, baseQuery);
+        /// <summary>
+        /// Batch kiểm tra danh sách barcodes đã tồn tại trong Ppt_BarCodeRep trên 1 máy BB.
+        /// Dùng IN clause thay vì query từng barcode riêng lẻ → giảm từ N DataTable xuống 1.
+        /// </summary>
+        private HashSet<string> BatchCheckExistingBarcodes(string serverIp, List<string> barcodes)
+        {
+            var result = new HashSet<string>();
+            if (barcodes.Count == 0) return result;
 
-            if (dataFromLau2?.Rows.Count > 0)
+            const int batchSize = 500;
+            for (int i = 0; i < barcodes.Count; i += batchSize)
             {
-                foreach (DataRow row in dataFromLau2.Rows)
+                var batch = barcodes.Skip(i).Take(batchSize);
+                string inClause = "'" + string.Join("','", batch) + "'";
+                string sql = $"SELECT Mater_Barcode FROM [mfns].[dbo].[Ppt_BarCodeRep] WHERE Mater_Barcode IN ({inClause})";
+
+                using (var dt = SQlcnn.ExecuteQueryWithIP(serverIp, sql))
                 {
-                    string barcode = row["Plan_ID"].ToString().Trim();
-
-                    // Kiểm tra nhanh từ bảng tracker (không cần query DB lại)
-                    if (syncedPlanIds.Contains(barcode))
-                        continue; // Đã sync rồi → bỏ qua
-
-                    try
+                    foreach (DataRow r in dt.Rows)
                     {
-                        // Kiểm tra barcode trong Ppt_BarCodeRep
-                        string checkBarcodeSql = $"SELECT Mater_Barcode FROM [mfns].[dbo].[Ppt_BarCodeRep] WHERE Mater_Barcode = '{barcode}'";
-                        var checkBarcodeDt = SQlcnn.ExecuteQueryWithIP(serverIp, checkBarcodeSql);
-
-                        if (checkBarcodeDt.Rows.Count > 0)
-                        {
-                            // Đã có barcode → ghi tracker trên server 10.33 (database BB) để lần sau bỏ qua
-                            SQlcnn.ExecuteNonQueryWithIP_BB(TrackerServer,
-                                $"INSERT INTO AutoSmall_SyncTracker (Plan_Id, ServerIp) VALUES ('{barcode}', '{serverIp}')");
-                            continue;
-                        }
-
-                        string may = row["Equip_code"].ToString().Trim();
-                        string pday = row["pday"].ToString().Trim();
-                        string recipe = row["Recipe_Name"].ToString().Trim();
-                        string planDate = row["time"].ToString().Trim();
-                        string weight = row["realwgt"].ToString().Trim();
-
-                        DateTime prodDate = DateTime.ParseExact(pday, "yyyyMMdd", CultureInfo.InvariantCulture);
-                        string effDate = prodDate.AddDays(7).ToString("yyyyMMdd");
-
-                        string insertSql = $"INSERT INTO [mfns].[dbo].[AutoSmall_ScanCode] " +
-                                           $"VALUES ('{barcode}', '{pday}', '{effDate}', '{recipe}', '{may}', '{planDate}', '{weight}', '0')";
-
-                        bool success = SQlcnn.ExecuteNonQueryWithIP(serverIp, insertSql);
-
-                        if (success)
-                        {
-                            // INSERT thành công → ghi vào tracker trên server 10.33 (database BB)
-                            SQlcnn.ExecuteNonQueryWithIP_BB(TrackerServer,
-                                $"INSERT INTO AutoSmall_SyncTracker (Plan_Id, ServerIp) VALUES ('{barcode}', '{serverIp}')");
-                        }
-                        // Nếu fail → không ghi tracker → lần sau tự động thử lại
-                    }
-                    catch
-                    {
-                        // Lỗi → bỏ qua dòng này, đợi lần sau thử lại
+                        result.Add(r["Mater_Barcode"].ToString().Trim());
                     }
                 }
             }
+
+            return result;
         }
 
         private DataTable GetDataFromLau2(string lau2Ip, string query)
