@@ -214,7 +214,7 @@ namespace ChuyenLieuBBlau2_BBlau3
 
             string sql = $@"
                 SELECT Plan_Id, ServerIp FROM AutoSmall_SyncTracker
-                WHERE SyncTime >= '{DateTime.Now.AddDays(-3):yyyy-MM-dd}'";
+                WHERE SyncTime >= '{DateTime.Now.AddDays(-2):yyyy-MM-dd}'";
 
             using (var dt = SQlcnn.ExecuteQueryWithIP_BB(TrackerServer, sql))
             {
