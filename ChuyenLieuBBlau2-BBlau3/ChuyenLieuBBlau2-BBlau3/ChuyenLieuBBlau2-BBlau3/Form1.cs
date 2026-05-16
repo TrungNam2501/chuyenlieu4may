@@ -104,7 +104,7 @@ namespace ChuyenLieuBBlau2_BBlau3
                     SyncTime DATETIME DEFAULT GETDATE(),
                     PRIMARY KEY (Plan_Id, ServerIp)
                 )";
-            SQlcnn.ExecuteNonQueryWithIP_ERP(TrackerServer, createTableSql);
+            SQlcnn.ExecuteNonQueryWithIP_BB(TrackerServer, createTableSql);
             _trackerTableCreated = true;
         }
 
@@ -121,7 +121,7 @@ namespace ChuyenLieuBBlau2_BBlau3
                 SELECT Plan_Id FROM AutoSmall_SyncTracker
                 WHERE ServerIp = '{serverIp}'
                   AND SyncTime >= '{DateTime.Now.AddDays(-3):yyyy-MM-dd}'";
-            var trackerDt = SQlcnn.ExecuteQueryWithIP_ERP(TrackerServer, loadTrackerSql);
+            var trackerDt = SQlcnn.ExecuteQueryWithIP_BB(TrackerServer, loadTrackerSql);
             var syncedPlanIds = new HashSet<string>();
             foreach (DataRow r in trackerDt.Rows)
             {
@@ -163,8 +163,8 @@ namespace ChuyenLieuBBlau2_BBlau3
 
                         if (checkBarcodeDt.Rows.Count > 0)
                         {
-                            // Đã có barcode → ghi tracker trên server 10.33 để lần sau bỏ qua
-                            SQlcnn.ExecuteNonQueryWithIP_ERP(TrackerServer,
+                            // Đã có barcode → ghi tracker trên server 10.33 (database BB) để lần sau bỏ qua
+                            SQlcnn.ExecuteNonQueryWithIP_BB(TrackerServer,
                                 $"INSERT INTO AutoSmall_SyncTracker (Plan_Id, ServerIp) VALUES ('{barcode}', '{serverIp}')");
                             continue;
                         }
@@ -185,8 +185,8 @@ namespace ChuyenLieuBBlau2_BBlau3
 
                         if (success)
                         {
-                            // INSERT thành công → ghi vào tracker trên server 10.33
-                            SQlcnn.ExecuteNonQueryWithIP_ERP(TrackerServer,
+                            // INSERT thành công → ghi vào tracker trên server 10.33 (database BB)
+                            SQlcnn.ExecuteNonQueryWithIP_BB(TrackerServer,
                                 $"INSERT INTO AutoSmall_SyncTracker (Plan_Id, ServerIp) VALUES ('{barcode}', '{serverIp}')");
                         }
                         // Nếu fail → không ghi tracker → lần sau tự động thử lại
