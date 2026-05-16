@@ -181,7 +181,7 @@ namespace ChuyenLieuBBlau2_BBlau3
                     // Lỗi → bỏ qua chu kỳ này
                 }
 
-                Thread.Sleep(200000); // 200 giây
+                Thread.Sleep(1800000); // 30 phút
             }
         }
 
