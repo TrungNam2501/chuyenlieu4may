@@ -89,8 +89,13 @@ namespace ChuyenLieuBBlau2_BBlau3
             }
         }
 
-        private void EnsureSyncTrackerTable(string serverIp)
+        private const string TrackerServer = "198.1.10.33";
+        private bool _trackerTableCreated = false;
+
+        private void EnsureSyncTrackerTable()
         {
+            if (_trackerTableCreated) return;
+
             string createTableSql = @"
                 IF NOT EXISTS (SELECT * FROM sysobjects WHERE name='AutoSmall_SyncTracker' AND xtype='U')
                 CREATE TABLE AutoSmall_SyncTracker (
@@ -99,7 +104,8 @@ namespace ChuyenLieuBBlau2_BBlau3
                     SyncTime DATETIME DEFAULT GETDATE(),
                     PRIMARY KEY (Plan_Id, ServerIp)
                 )";
-            SQlcnn.ExecuteNonQueryWithIP(serverIp, createTableSql);
+            SQlcnn.ExecuteNonQueryWithIP_ERP(TrackerServer, createTableSql);
+            _trackerTableCreated = true;
         }
 
         private void ChuyenLieu_HC(string serverIp, string lau2Ip)
@@ -107,15 +113,15 @@ namespace ChuyenLieuBBlau2_BBlau3
             if (!lau2ToEquip.TryGetValue(lau2Ip, out string equipCode))
                 return;
 
-            // Đảm bảo bảng tracker tồn tại
-            EnsureSyncTrackerTable(serverIp);
+            // Đảm bảo bảng tracker tồn tại trên server 10.33
+            EnsureSyncTrackerTable();
 
             // Load 1 lần toàn bộ Plan_Id đã sync thành công trên máy này (3 ngày gần nhất)
             string loadTrackerSql = $@"
                 SELECT Plan_Id FROM AutoSmall_SyncTracker
                 WHERE ServerIp = '{serverIp}'
                   AND SyncTime >= '{DateTime.Now.AddDays(-3):yyyy-MM-dd}'";
-            var trackerDt = SQlcnn.ExecuteQueryWithIP(serverIp, loadTrackerSql);
+            var trackerDt = SQlcnn.ExecuteQueryWithIP_ERP(TrackerServer, loadTrackerSql);
             var syncedPlanIds = new HashSet<string>();
             foreach (DataRow r in trackerDt.Rows)
             {
@@ -157,8 +163,8 @@ namespace ChuyenLieuBBlau2_BBlau3
 
                         if (checkBarcodeDt.Rows.Count > 0)
                         {
-                            // Đã có barcode → ghi tracker để lần sau không kiểm tra lại
-                            SQlcnn.ExecuteNonQueryWithIP(serverIp,
+                            // Đã có barcode → ghi tracker trên server 10.33 để lần sau bỏ qua
+                            SQlcnn.ExecuteNonQueryWithIP_ERP(TrackerServer,
                                 $"INSERT INTO AutoSmall_SyncTracker (Plan_Id, ServerIp) VALUES ('{barcode}', '{serverIp}')");
                             continue;
                         }
@@ -179,8 +185,8 @@ namespace ChuyenLieuBBlau2_BBlau3
 
                         if (success)
                         {
-                            // INSERT thành công → ghi vào tracker
-                            SQlcnn.ExecuteNonQueryWithIP(serverIp,
+                            // INSERT thành công → ghi vào tracker trên server 10.33
+                            SQlcnn.ExecuteNonQueryWithIP_ERP(TrackerServer,
                                 $"INSERT INTO AutoSmall_SyncTracker (Plan_Id, ServerIp) VALUES ('{barcode}', '{serverIp}')");
                         }
                         // Nếu fail → không ghi tracker → lần sau tự động thử lại
