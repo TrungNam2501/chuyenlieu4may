@@ -95,7 +95,7 @@ namespace ChuyenLieuBBlau2_BBlau3.ConnSQL
 
         public static DataTable ExecuteQueryWithIP_BB(string ip, string Query, object[] parameter = null)
         {
-            string ConnectionString = "Data Source=" + ip + ";Failover Partner=198.1.10.31;Initial Catalog=BB;User ID=kendakv2;Password=kenda123";
+            string ConnectionString = "Data Source=" + ip + ";Initial Catalog=BB;User ID=kendakv2;Password=kenda123";
             using (var conn = new SqlConnection(ConnectionString))
             {
                 try
