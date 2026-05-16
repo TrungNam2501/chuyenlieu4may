@@ -15,7 +15,7 @@ namespace ChuyenLieuBBlau2_BBlau3
         private readonly string[] lau2Ips = { "198.1.8.15", "198.1.8.16", "198.1.8.17", "198.1.8.18" };
         private readonly Dictionary<string, Label> statusLabels;
 
-        private const string TrackerServer = "198.1.10.33";
+        private const string TrackerServer = "198.1.9.186";
         private const string ERP_SERVER = "198.1.10.33";
         private const string GET_IP_QUERY = "SELECT [ip] FROM [erp].[dbo].[P8500_IP] WHERE machno LIKE 'V-BB%'";
         private const string DEL_DUP_QUERY = @"
