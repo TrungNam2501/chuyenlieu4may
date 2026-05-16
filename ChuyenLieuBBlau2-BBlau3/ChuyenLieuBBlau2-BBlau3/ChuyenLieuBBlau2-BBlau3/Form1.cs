@@ -3,7 +3,7 @@ using System;
 using System.Collections.Generic;
 using System.Data;
 using System.Globalization;
-using System.Linq;
+
 using System.Net.NetworkInformation;
 using System.Threading;
 using System.Windows.Forms;
@@ -119,26 +119,13 @@ namespace ChuyenLieuBBlau2_BBlau3
                                     continue;
                                 }
 
-                                // Bước 5: Batch kiểm tra barcodes đã tồn tại trong Ppt_BarCodeRep
-                                // 1 query IN(...) thay vì N query riêng lẻ (sửa memory leak DataTable)
-                                var barcodeList = toProcess.Select(r => r["Plan_ID"].ToString().Trim()).ToList();
-                                var existingBarcodes = BatchCheckExistingBarcodes(bbIp, barcodeList);
-
-                                // Bước 6: INSERT từng barcode chưa có
+                                // Bước 5: INSERT từng barcode chưa có trong tracker
                                 foreach (DataRow row in toProcess)
                                 {
                                     string barcode = row["Plan_ID"].ToString().Trim();
 
                                     try
                                     {
-                                        if (existingBarcodes.Contains(barcode))
-                                        {
-                                            // Đã có barcode → ghi tracker để lần sau bỏ qua
-                                            SQlcnn.ExecuteNonQueryWithIP_BB(TrackerServer,
-                                                $"INSERT INTO AutoSmall_SyncTracker (Plan_Id, ServerIp) VALUES ('{barcode}', '{bbIp}')");
-                                            continue;
-                                        }
-
                                         string may = row["Equip_code"].ToString().Trim();
                                         string pday = row["pday"].ToString().Trim();
                                         string recipe = row["Recipe_Name"].ToString().Trim();
@@ -232,33 +219,6 @@ namespace ChuyenLieuBBlau2_BBlau3
             return result;
         }
 
-        /// <summary>
-        /// Batch kiểm tra danh sách barcodes đã tồn tại trong Ppt_BarCodeRep trên 1 máy BB.
-        /// Dùng IN clause thay vì query từng barcode riêng lẻ → giảm từ N DataTable xuống 1.
-        /// </summary>
-        private HashSet<string> BatchCheckExistingBarcodes(string serverIp, List<string> barcodes)
-        {
-            var result = new HashSet<string>();
-            if (barcodes.Count == 0) return result;
-
-            const int batchSize = 500;
-            for (int i = 0; i < barcodes.Count; i += batchSize)
-            {
-                var batch = barcodes.Skip(i).Take(batchSize);
-                string inClause = "'" + string.Join("','", batch) + "'";
-                string sql = $"SELECT Mater_Barcode FROM [mfns].[dbo].[Ppt_BarCodeRep] WHERE Mater_Barcode IN ({inClause})";
-
-                using (var dt = SQlcnn.ExecuteQueryWithIP(serverIp, sql))
-                {
-                    foreach (DataRow r in dt.Rows)
-                    {
-                        result.Add(r["Mater_Barcode"].ToString().Trim());
-                    }
-                }
-            }
-
-            return result;
-        }
 
         private DataTable GetDataFromLau2(string lau2Ip, string query)
         {
