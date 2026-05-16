@@ -89,12 +89,40 @@ namespace ChuyenLieuBBlau2_BBlau3
             }
         }
 
+        private void EnsureSyncTrackerTable(string serverIp)
+        {
+            string createTableSql = @"
+                IF NOT EXISTS (SELECT * FROM sysobjects WHERE name='AutoSmall_SyncTracker' AND xtype='U')
+                CREATE TABLE AutoSmall_SyncTracker (
+                    Plan_Id NVARCHAR(50) NOT NULL,
+                    ServerIp NVARCHAR(20) NOT NULL,
+                    SyncTime DATETIME DEFAULT GETDATE(),
+                    PRIMARY KEY (Plan_Id, ServerIp)
+                )";
+            SQlcnn.ExecuteNonQueryWithIP(serverIp, createTableSql);
+        }
+
         private void ChuyenLieu_HC(string serverIp, string lau2Ip)
         {
             if (!lau2ToEquip.TryGetValue(lau2Ip, out string equipCode))
                 return;
 
-            // Lấy TẤT CẢ dữ liệu cân từ lầu 2 (không loại trừ)
+            // Đảm bảo bảng tracker tồn tại
+            EnsureSyncTrackerTable(serverIp);
+
+            // Load 1 lần toàn bộ Plan_Id đã sync thành công trên máy này (3 ngày gần nhất)
+            string loadTrackerSql = $@"
+                SELECT Plan_Id FROM AutoSmall_SyncTracker
+                WHERE ServerIp = '{serverIp}'
+                  AND SyncTime >= '{DateTime.Now.AddDays(-3):yyyy-MM-dd}'";
+            var trackerDt = SQlcnn.ExecuteQueryWithIP(serverIp, loadTrackerSql);
+            var syncedPlanIds = new HashSet<string>();
+            foreach (DataRow r in trackerDt.Rows)
+            {
+                syncedPlanIds.Add(r["Plan_Id"].ToString().Trim());
+            }
+
+            // Lấy TẤT CẢ dữ liệu cân từ lầu 2
             string baseQuery = $@"
                 SELECT 
                     a.[Plan_id] + RIGHT('000' + CAST([Serial_Num] AS VARCHAR(5)), 3) AS Plan_ID,
@@ -117,26 +145,23 @@ namespace ChuyenLieuBBlau2_BBlau3
                 {
                     string barcode = row["Plan_ID"].ToString().Trim();
 
+                    // Kiểm tra nhanh từ bảng tracker (không cần query DB lại)
+                    if (syncedPlanIds.Contains(barcode))
+                        continue; // Đã sync rồi → bỏ qua
+
                     try
                     {
-                        // Kiểm tra dữ liệu đã có trên máy BB này chưa
-                        string checkExistSql = $@"
-                            SELECT Plan_Id FROM [mfns].[dbo].[AutoSmall_ScanCode]
-                            WHERE Plan_Id = '{barcode}'
-                            UNION
-                            SELECT Plan_Id FROM [mfns].[dbo].[AutoSmall_ScanCode_new]
-                            WHERE Plan_Id = '{barcode}'";
-                        var existDt = SQlcnn.ExecuteQueryWithIP(serverIp, checkExistSql);
-
-                        if (existDt.Rows.Count > 0)
-                            continue; // Đã có trên máy này → bỏ qua
-
                         // Kiểm tra barcode trong Ppt_BarCodeRep
                         string checkBarcodeSql = $"SELECT Mater_Barcode FROM [mfns].[dbo].[Ppt_BarCodeRep] WHERE Mater_Barcode = '{barcode}'";
                         var checkBarcodeDt = SQlcnn.ExecuteQueryWithIP(serverIp, checkBarcodeSql);
 
                         if (checkBarcodeDt.Rows.Count > 0)
-                            continue; // Đã có barcode → bỏ qua
+                        {
+                            // Đã có barcode → ghi tracker để lần sau không kiểm tra lại
+                            SQlcnn.ExecuteNonQueryWithIP(serverIp,
+                                $"INSERT INTO AutoSmall_SyncTracker (Plan_Id, ServerIp) VALUES ('{barcode}', '{serverIp}')");
+                            continue;
+                        }
 
                         string may = row["Equip_code"].ToString().Trim();
                         string pday = row["pday"].ToString().Trim();
@@ -150,7 +175,15 @@ namespace ChuyenLieuBBlau2_BBlau3
                         string insertSql = $"INSERT INTO [mfns].[dbo].[AutoSmall_ScanCode] " +
                                            $"VALUES ('{barcode}', '{pday}', '{effDate}', '{recipe}', '{may}', '{planDate}', '{weight}', '0')";
 
-                        SQlcnn.ExecuteNonQueryWithIP(serverIp, insertSql);
+                        bool success = SQlcnn.ExecuteNonQueryWithIP(serverIp, insertSql);
+
+                        if (success)
+                        {
+                            // INSERT thành công → ghi vào tracker
+                            SQlcnn.ExecuteNonQueryWithIP(serverIp,
+                                $"INSERT INTO AutoSmall_SyncTracker (Plan_Id, ServerIp) VALUES ('{barcode}', '{serverIp}')");
+                        }
+                        // Nếu fail → không ghi tracker → lần sau tự động thử lại
                     }
                     catch
                     {
